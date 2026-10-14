@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -31,10 +32,11 @@ ema_length = st.sidebar.number_input("EMA Length", min_value=5, max_value=50, va
 # ⚙️ BACKTEST CORE ENGINE
 # ==============================================================
 def process_data(raw_df, rrr, ema_len, setup_mode):
-    # Extract name layer whether column is a nested multi-index tuple or standard string
+    # Safely extract column name whether column is a tuple or string
     flat_data = {}
     for col in raw_df.columns:
-        name = col.lower().strip() if isinstance(col, tuple) else str(col).lower().strip()
+        col_name = col[0] if isinstance(col, tuple) else col
+        name = str(col_name).lower().strip()
         if name in ['open', 'high', 'low', 'close', 'volume']:
             flat_data[name] = raw_df[col].to_numpy().flatten().astype(float)
 
@@ -47,7 +49,6 @@ def process_data(raw_df, rrr, ema_len, setup_mode):
     if df.index.tz is not None:
         df.index = df.index.tz_convert('Asia/Kolkata')
 
-    # Clean 1D arrays for pure math operations
     open_arr = df['open'].to_numpy()
     high_arr = df['high'].to_numpy()
     low_arr = df['low'].to_numpy()
@@ -108,6 +109,12 @@ def process_data(raw_df, rrr, ema_len, setup_mode):
     t_start = time(9, 30)
     t_end = time(14, 45)
 
+    is_bull_arr = df['is_bull'].to_numpy()
+    is_bear_arr = df['is_bear'].to_numpy()
+    ema_arr = df['ema_20'].to_numpy()
+    vwap_arr = df['vwap'].to_numpy()
+    atr_arr = df['atr'].to_numpy()
+
     # Optimized Strategy Trade Simulation Loop
     for i in range(1, len(df)):
         current_time = df.index[i]
@@ -146,25 +153,25 @@ def process_data(raw_df, rrr, ema_len, setup_mode):
                     in_position = False
             continue
 
-        current_ema = float(df.iloc[i]['ema_20'])
-        current_vwap = float(df.iloc[i]['vwap'])
-        current_atr = float(df.iloc[i]['atr'])
+        current_ema = float(ema_arr[i])
+        current_vwap = float(vwap_arr[i])
+        current_atr = float(atr_arr[i])
 
         in_time_win = (current_time_only >= t_start and current_time_only <= t_end)
         vwap_ok_ce = (current_close > current_vwap)
         vwap_ok_pe = (current_close < current_vwap)
 
         # CALL Entry Condition (EMA + VWAP Confluence)
-        if bool(df.iloc[i]['is_bull']) and (current_close > current_ema) and vwap_ok_ce and in_time_win:
-            df.iloc[i, df.columns.get_loc('signal')] = "BUY CALL (CE)"
+        if bool(is_bull_arr[i]) and (current_close > current_ema) and vwap_ok_ce and in_time_win:
+            df.at[current_time, 'signal'] = "BUY CALL (CE)"
             in_position, pos_type, entry_price = True, "CE", current_close
             sl_price = current_low - (0.2 * current_atr)
             tp_price = entry_price + ((entry_price - sl_price) * rrr)
             entry_time, candle_count = current_time, 0
 
         # PUT Entry Condition (EMA + VWAP Confluence)
-        elif bool(df.iloc[i]['is_bear']) and (current_close < current_ema) and vwap_ok_pe and in_time_win:
-            df.iloc[i, df.columns.get_loc('signal')] = "BUY PUT (PE)"
+        elif bool(is_bear_arr[i]) and (current_close < current_ema) and vwap_ok_pe and in_time_win:
+            df.at[current_time, 'signal'] = "BUY PUT (PE)"
             in_position, pos_type, entry_price = True, "PE", current_close
             sl_price = current_high + (0.2 * current_atr)
             tp_price = entry_price - ((sl_price - entry_price) * rrr)
