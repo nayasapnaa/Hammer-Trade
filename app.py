@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import yfinance as yf
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta
 
 # ==============================================================
 # 📊 PAGE SETUP
@@ -32,66 +32,55 @@ ema_length = st.sidebar.number_input("EMA Length", min_value=5, max_value=50, va
 # ⚙️ BACKTEST CORE ENGINE
 # ==============================================================
 def process_data(raw_df, rrr, ema_len, setup_mode):
-    # Extract top-level field name whether column is a MultiIndex tuple or standard string
+    # Extract name layer whether column is a nested multi-index tuple or standard string
     flat_data = {}
     for col in raw_df.columns:
         name = col.lower().strip() if isinstance(col, tuple) else str(col).lower().strip()
         if name in ['open', 'high', 'low', 'close', 'volume']:
             flat_data[name] = raw_df[col].to_numpy().flatten().astype(float)
 
+    # Reassemble a completely standard flat single-level column DataFrame
     df = pd.DataFrame(flat_data, index=raw_df.index).dropna()
 
     if df.empty or len(df) < 10:
         return df, pd.DataFrame()
 
-    # Convert DatetimeIndex to Indian Standard Time (Asia/Kolkata)
-    if df.index.tz is not None:
-        df.index = df.index.tz_convert('Asia/Kolkata')
-
-    # Extract 1D arrays for numeric operations
+    # Extract clean 1D arrays for pure math operations
     open_arr = df['open'].to_numpy()
     high_arr = df['high'].to_numpy()
     low_arr = df['low'].to_numpy()
     close_arr = df['close'].to_numpy()
     volume_arr = df['volume'].to_numpy()
 
-    # Technical Indicators Calculations
+    # Technical Indicators Calculations (Calculated on standardized flat float fields)
     df['ema_20'] = df['close'].ewm(span=ema_len, adjust=False).mean()
     df['date_group'] = df.index.date
 
-    # Intraday VWAP Calculation
     typical_price = (high_arr + low_arr + close_arr) / 3.0
     df['tp_vol'] = typical_price * volume_arr
     df['cum_tp_vol'] = df.groupby('date_group')['tp_vol'].cumsum()
     df['cum_vol'] = df.groupby('date_group')['volume'].cumsum()
-    cum_vol_arr = df['cum_vol'].to_numpy()
-    df['vwap'] = np.where(cum_vol_arr > 0, df['cum_tp_vol'] / cum_vol_arr, close_arr)
-
-    # 14-period ATR Volatility Calculation
-    high_low = high_arr - low_arr
-    high_close = np.abs(high_arr - np.roll(close_arr, 1))
-    low_close = np.abs(low_arr - np.roll(close_arr, 1))
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    df['atr'] = pd.Series(tr, index=df.index).rolling(14).mean().fillna(5.0).to_numpy()
+    df['vwap'] = df['cum_tp_vol'] / df['cum_vol']
 
     # Core Pattern Geometry Formulas
     body = np.abs(close_arr - open_arr)
-    body_eps = np.where(body == 0, 0.001, body)
+    candle_range = high_arr - low_arr
+    body_eps = np.where(body == 0, 0.001, body)  # Prevent division by zero errors
 
     prev_open = np.zeros_like(open_arr)
     prev_close = np.zeros_like(close_arr)
     prev_open[1:] = open_arr[:-1]
     prev_close[1:] = close_arr[:-1]
 
-    # Pattern Conditions
+    # Mathematical definitions for high frequency candle triggers
     bull_eng = (close_arr > open_arr) & (prev_close < prev_open) & (open_arr <= prev_close) & (close_arr >= prev_open)
     bear_eng = (close_arr < open_arr) & (prev_close > prev_open) & (open_arr >= prev_close) & (close_arr <= prev_open)
 
     lower_shadow = np.where(close_arr > open_arr, open_arr - low_arr, close_arr - low_arr)
     upper_shadow = np.where(close_arr > open_arr, high_arr - close_arr, high_arr - open_arr)
 
-    bull_hammer = (lower_shadow >= (1.2 * body_eps)) & (upper_shadow <= (0.6 * body_eps))
-    bear_star = (upper_shadow >= (1.2 * body_eps)) & (lower_shadow <= (0.6 * body_eps))
+    bull_hammer = (lower_shadow > (1.1 * body_eps)) & (upper_shadow < (0.6 * body_eps))
+    bear_star = (upper_shadow > (1.1 * body_eps)) & (lower_shadow < (0.6 * body_eps))
 
     if setup_mode == "Only Engulfing":
         df['is_bull'], df['is_bear'] = bull_eng, bear_eng
@@ -106,77 +95,51 @@ def process_data(raw_df, rrr, ema_len, setup_mode):
     candle_count = 0
     df['signal'] = "HOLD"
 
-    t_start = time(9, 30)
-    t_end = time(15, 0)
-
-    is_bull_arr = df['is_bull'].to_numpy()
-    is_bear_arr = df['is_bear'].to_numpy()
-    ema_arr = df['ema_20'].to_numpy()
-    vwap_arr = df['vwap'].to_numpy()
-    atr_arr = df['atr'].to_numpy()
-
-    # Strategy Simulation Loop
+    # Optimized Strategy Trade Simulation Loop
     for i in range(1, len(df)):
         current_time = df.index[i]
-        current_close = float(close_arr[i])
-        current_high = float(high_arr[i])
-        current_low = float(low_arr[i])
-        current_time_only = current_time.time()
-
+        current_close = float(df.iloc[i]['close'])
+        
         if in_position:
             candle_count += 1
             if pos_type == "CE":
-                if current_low <= sl_price:
-                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "CALL (CE)",
-                                      "Entry": entry_price, "Exit": sl_price, "P&L Points": round(sl_price - entry_price, 2), "Outcome": "STOP LOSS"})
+                if float(df.iloc[i]['low']) <= sl_price:
+                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "CALL (CE)", "Entry": entry_price, "Exit": sl_price, "P&L Points": round(sl_price - entry_price, 2), "Outcome": "STOP LOSS"})
                     in_position = False
-                elif current_high >= tp_price:
-                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "CALL (CE)",
-                                      "Entry": entry_price, "Exit": tp_price, "P&L Points": round(tp_price - entry_price, 2), "Outcome": "TARGET HIT"})
+                elif float(df.iloc[i]['high']) >= tp_price:
+                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "CALL (CE)", "Entry": entry_price, "Exit": tp_price, "P&L Points": round(tp_price - entry_price, 2), "Outcome": "TARGET HIT"})
                     in_position = False
                 elif candle_count >= 5:
-                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "CALL (CE)",
-                                      "Entry": entry_price, "Exit": current_close, "P&L Points": round(current_close - entry_price, 2), "Outcome": "TIME OUT"})
+                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "CALL (CE)", "Entry": entry_price, "Exit": current_close, "P&L Points": round(current_close - entry_price, 2), "Outcome": "TIME OUT"})
                     in_position = False
             elif pos_type == "PE":
-                if current_high >= sl_price:
-                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "PUT (PE)",
-                                      "Entry": entry_price, "Exit": sl_price, "P&L Points": round(entry_price - sl_price, 2), "Outcome": "STOP LOSS"})
+                if float(df.iloc[i]['high']) >= sl_price:
+                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "PUT (PE)", "Entry": entry_price, "Exit": sl_price, "P&L Points": round(entry_price - sl_price, 2), "Outcome": "STOP LOSS"})
                     in_position = False
-                elif current_low <= tp_price:
-                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "PUT (PE)",
-                                      "Entry": entry_price, "Exit": tp_price, "P&L Points": round(entry_price - tp_price, 2), "Outcome": "TARGET HIT"})
+                elif float(df.iloc[i]['low']) <= tp_price:
+                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "PUT (PE)", "Entry": entry_price, "Exit": tp_price, "P&L Points": round(entry_price - tp_price, 2), "Outcome": "TARGET HIT"})
                     in_position = False
                 elif candle_count >= 5:
-                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "PUT (PE)",
-                                      "Entry": entry_price, "Exit": current_close, "P&L Points": round(entry_price - current_close, 2), "Outcome": "TIME OUT"})
+                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "PUT (PE)", "Entry": entry_price, "Exit": current_close, "P&L Points": round(entry_price - current_close, 2), "Outcome": "TIME OUT"})
                     in_position = False
             continue
-
-        current_ema = float(ema_arr[i])
-        current_vwap = float(vwap_arr[i])
-        current_atr = float(atr_arr[i])
-
-        in_time_win = (current_time_only >= t_start and current_time_only <= t_end)
-        vwap_ok_ce = (current_close > current_vwap)
-        vwap_ok_pe = (current_close < current_vwap)
-
-        # CALL Entry Condition (EMA + VWAP Trend Confluence)
-        if bool(is_bull_arr[i]) and (current_close > current_ema) and vwap_ok_ce and in_time_win:
-            df.at[current_time, 'signal'] = "BUY CALL (CE)"
+            
+        current_ema = float(df.iloc[i]['ema_20'])
+        
+        # Valid entry matching using clean floating-point numerical constraints
+        if bool(df.iloc[i]['is_bull']) and (current_close > current_ema):
+            df.iloc[i, df.columns.get_loc('signal')] = "BUY CALL (CE)"
             in_position, pos_type, entry_price = True, "CE", current_close
-            sl_price = current_low - (0.2 * current_atr)
+            sl_price = float(df.iloc[i]['low'])
             tp_price = entry_price + ((entry_price - sl_price) * rrr)
             entry_time, candle_count = current_time, 0
-
-        # PUT Entry Condition (EMA + VWAP Trend Confluence)
-        elif bool(is_bear_arr[i]) and (current_close < current_ema) and vwap_ok_pe and in_time_win:
-            df.at[current_time, 'signal'] = "BUY PUT (PE)"
+        elif bool(df.iloc[i]['is_bear']) and (current_close < current_ema):
+            df.iloc[i, df.columns.get_loc('signal')] = "BUY PUT (PE)"
             in_position, pos_type, entry_price = True, "PE", current_close
-            sl_price = current_high + (0.2 * current_atr)
+            sl_price = float(df.iloc[i]['high'])
             tp_price = entry_price - ((sl_price - entry_price) * rrr)
             entry_time, candle_count = current_time, 0
-
+            
     return df, pd.DataFrame(trade_log)
 
 # ==============================================================
@@ -188,44 +151,29 @@ else:
     ticker_symbol = "^NSEI"
     with st.spinner("Connecting to live exchanges to download Nifty data..."):
         raw_data = yf.download(tickers=ticker_symbol, start=start_date, end=end_date + timedelta(days=1), interval="5m")
-
+        
     if not raw_data.empty:
         results_df, trades_df = process_data(raw_data.copy(), risk_reward_ratio, ema_length, trade_setup)
-
+        
         if not trades_df.empty:
             col1, col2, col3, col4 = st.columns(4)
-            wins = len(trades_df[trades_df['P&L Points'] > 0])
-            win_rate = (wins / len(trades_df)) * 100
-
+            win_rate = (len(trades_df[trades_df['P&L Points'] > 0]) / len(trades_df)) * 100
+            
             col1.metric("Total Executed Trades", len(trades_df))
             col2.metric("Win Rate (%)", f"{win_rate:.1f}%")
             col3.metric("Net Strategy Points", f"{trades_df['P&L Points'].sum():+.2f}")
             col4.metric("Trading Candles Processed", f"{len(results_df)}")
-
+            
             st.subheader("📋 Closed Trade Performance Sheet")
             def style_pnl(val):
                 return f"color: {'green' if val > 0 else 'red'}; font-weight: bold;"
-
-            st.dataframe(trades_df.style.map(style_pnl, subset=['P&L Points']), use_container_width=True)
-
+            
+            st.dataframe(trades_df.style.map(style_pnl, subset=['P&L Points']))
+            
             st.subheader("📈 Technical Chart Overlay")
-            fig = go.Figure(data=[go.Candlestick(
-                x=results_df.index, open=results_df['open'], high=results_df['high'],
-                low=results_df['low'], close=results_df['close'], name='Nifty 50'
-            )])
+            fig = go.Figure(data=[go.Candlestick(x=results_df.index, open=results_df['open'], high=results_df['high'], low=results_df['low'], close=results_df['close'], name='Nifty 50')])
             fig.add_trace(go.Scatter(x=results_df.index, y=results_df['vwap'], line=dict(color='orange', width=1.2), name='VWAP'))
             fig.add_trace(go.Scatter(x=results_df.index, y=results_df['ema_20'], line=dict(color='blue', width=1.2), name='EMA'))
-
-            # Signal Markers
-            buy_ce = results_df[results_df['signal'] == "BUY CALL (CE)"]
-            buy_pe = results_df[results_df['signal'] == "BUY PUT (PE)"]
-
-            fig.add_trace(go.Scatter(x=buy_ce.index, y=buy_ce['low'] - 10, mode='markers',
-                                     marker=dict(symbol='triangle-up', size=12, color='green'), name='BUY CALL'))
-            fig.add_trace(go.Scatter(x=buy_pe.index, y=buy_pe['high'] + 10, mode='markers',
-                                     marker=dict(symbol='triangle-down', size=12, color='red'), name='BUY PUT'))
-
-            fig.update_layout(xaxis_rangeslider_visible=False, height=600, template="plotly_dark")
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.warning(f"⚠️ Data parsed ({len(results_df)} candles), but no trades triggered. Try widening your date duration to scan a larger market window.")
