@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -37,10 +38,11 @@ pattern_strictness = st.sidebar.selectbox("Candle Shadow Strictness", ["Stricter
 # BACKTEST CORE ENGINE
 # ==========================================
 def process_data(raw_df, rrr, ema_len, setup_mode, atr_mult, vwap_filter, time_filter, strict_geom):
-    # Explicitly extract and flatten yfinance columns
+    # Safely unpack yfinance MultiIndex or single-level columns
     flat_data = {}
     for col in raw_df.columns:
-        name = col.lower().strip() if isinstance(col, tuple) else str(col).lower().strip()
+        col_name = col[0] if isinstance(col, tuple) else col
+        name = str(col_name).lower().strip()
         if name in ['open', 'high', 'low', 'close', 'volume']:
             flat_data[name] = raw_df[col].to_numpy().flatten().astype(float)
 
@@ -64,7 +66,8 @@ def process_data(raw_df, rrr, ema_len, setup_mode, atr_mult, vwap_filter, time_f
     df['tp_vol'] = typical_price * volume_arr
     df['cum_tp_vol'] = df.groupby('date_group')['tp_vol'].cumsum()
     df['cum_vol'] = df.groupby('date_group')['volume'].cumsum()
-    df['vwap'] = df['cum_tp_vol'] / df['cum_vol']
+    cum_vol_arr = df['cum_vol'].to_numpy()
+    df['vwap'] = np.where(cum_vol_arr > 0, df['cum_tp_vol'] / cum_vol_arr, close_arr)
 
     # 14-period ATR Calculation
     high_low = high_arr - low_arr
@@ -157,7 +160,7 @@ def process_data(raw_df, rrr, ema_len, setup_mode, atr_mult, vwap_filter, time_f
 
         # CALL Entry Condition
         if bool(df.iloc[i]['is_bull']) and (current_close > current_ema) and vwap_ok_ce and in_time_win:
-            df.iloc[i, df.columns.get_loc('signal')] = "BUY CALL (CE)"
+            df.at[current_time, 'signal'] = "BUY CALL (CE)"
             in_position, pos_type, entry_price = True, "CE", current_close
             sl_price = current_low - (atr_mult * current_atr)
             tp_price = entry_price + ((entry_price - sl_price) * rrr)
@@ -165,7 +168,7 @@ def process_data(raw_df, rrr, ema_len, setup_mode, atr_mult, vwap_filter, time_f
 
         # PUT Entry Condition
         elif bool(df.iloc[i]['is_bear']) and (current_close < current_ema) and vwap_ok_pe and in_time_win:
-            df.iloc[i, df.columns.get_loc('signal')] = "BUY PUT (PE)"
+            df.at[current_time, 'signal'] = "BUY PUT (PE)"
             in_position, pos_type, entry_price = True, "PE", current_close
             sl_price = current_high + (atr_mult * current_atr)
             tp_price = entry_price - ((sl_price - entry_price) * rrr)
