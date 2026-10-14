@@ -27,34 +27,40 @@ vol_multiplier = st.sidebar.slider("Volume Filter (Lower = More Trades)", 0.0, 2
 
 # --- BACKTEST CORE ENGINE ---
 def process_data(df, rrr, ema_len, vol_mult, setup_mode):
-    # Flatten any MultiIndex layers explicitly using string comprehension
+    # Fix MultiIndex or nested columns from yfinance by dropping the outer levels
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [f"{col[0]}".lower().strip() for col in df.columns]
+        df.columns = [col[0].lower().strip() for col in df.columns]
     else:
         df.columns = [str(col).lower().strip() for col in df.columns]
 
     needed = ['open', 'high', 'low', 'close', 'volume']
     df = df[needed].dropna().copy()
     
-    # Cast variables explicitly into float format arrays
-    open_arr = df['open'].to_numpy().astype(float)
-    high_arr = df['high'].to_numpy().astype(float)
-    low_arr = df['low'].to_numpy().astype(float)
-    close_arr = df['close'].to_numpy().astype(float)
-    volume_arr = df['volume'].to_numpy().astype(float)
+    # Cast dataframe columns explicitly into floats
+    for col in needed:
+        df[col] = df[col].astype(float)
 
-    # Technical Indicators Calculations
+    # 1. Technical Indicators (Clean Pandas Style)
     df['ema_20'] = df['close'].ewm(span=ema_len, adjust=False).mean()
     df['date_group'] = df.index.date
-    typical_price = (high_arr + low_arr + close_arr) / 3.0
-    df['cum_tp_vol'] = (typical_price * volume_arr).groupby(df['date_group']).cumsum()
-    df['cum_vol'] = df['volume'].groupby(df['date_group']).cumsum()
+    
+    # Standard Intraday VWAP calculation
+    typical_price = (df['high'] + df['low'] + df['close']) / 3.0
+    df['tp_vol'] = typical_price * df['volume']
+    df['cum_tp_vol'] = df.groupby('date_group')['tp_vol'].cumsum()
+    df['cum_vol'] = df.groupby('date_group')['volume'].cumsum()
     df['vwap'] = df['cum_tp_vol'] / df['cum_vol']
     
+    # Volume Filter
     df['vol_sma'] = df['volume'].rolling(window=10).mean()
     df['volume_spike'] = df['volume'] > (df['vol_sma'] * vol_mult)
     
-    # Core Pattern Geometry Formulas
+    # Extract Arrays for Candlestick Identification
+    open_arr = df['open'].to_numpy()
+    high_arr = df['high'].to_numpy()
+    low_arr = df['low'].to_numpy()
+    close_arr = df['close'].to_numpy()
+
     body = np.abs(close_arr - open_arr)
     candle_range = high_arr - low_arr
     
@@ -63,6 +69,7 @@ def process_data(df, rrr, ema_len, vol_mult, setup_mode):
     prev_open[1:] = open_arr[:-1]
     prev_close[1:] = close_arr[:-1]
     
+    # Candlestick Calculations
     bull_eng = (close_arr > open_arr) & (prev_close < prev_open) & (open_arr <= prev_close) & (close_arr >= prev_open)
     bear_eng = (close_arr < open_arr) & (prev_close > prev_open) & (open_arr >= prev_close) & (close_arr <= prev_open)
     
@@ -134,7 +141,6 @@ else:
     ticker_symbol = "^NSEI"
     
     with st.spinner(f"Connecting to live exchanges to download Nifty data..."):
-        # Explicitly configure yfinance to drop additional column nests
         raw_data = yf.download(tickers=ticker_symbol, start=start_date, end=end_date + timedelta(days=1), interval="5m")
         
     if not raw_data.empty:
