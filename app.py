@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -51,6 +50,10 @@ def process_data(raw_df, rrr, ema_len, setup_mode, atr_mult, vwap_filter, time_f
     if df.empty or len(df) < 10:
         return df, pd.DataFrame()
 
+    # Align Datetime Index to Indian Standard Time (Asia/Kolkata)
+    if df.index.tz is not None:
+        df.index = df.index.tz_convert('Asia/Kolkata')
+
     open_arr = df['open'].to_numpy()
     high_arr = df['high'].to_numpy()
     low_arr = df['low'].to_numpy()
@@ -91,8 +94,8 @@ def process_data(raw_df, rrr, ema_len, setup_mode, atr_mult, vwap_filter, time_f
     lower_shadow = np.where(close_arr > open_arr, open_arr - low_arr, close_arr - low_arr)
     upper_shadow = np.where(close_arr > open_arr, high_arr - close_arr, high_arr - open_arr)
 
-    shadow_ratio = 1.5 if "Stricter" in strict_geom else 1.1
-    upper_max_ratio = 0.5 if "Stricter" in strict_geom else 0.6
+    shadow_ratio = 1.5 if "Stricter" in str(strict_geom) else 1.1
+    upper_max_ratio = 0.5 if "Stricter" in str(strict_geom) else 0.6
 
     bull_hammer = (lower_shadow >= (shadow_ratio * body_eps)) & (upper_shadow <= (upper_max_ratio * body_eps))
     bear_star = (upper_shadow >= (shadow_ratio * body_eps)) & (lower_shadow <= (upper_max_ratio * body_eps))
@@ -115,9 +118,9 @@ def process_data(raw_df, rrr, ema_len, setup_mode, atr_mult, vwap_filter, time_f
 
     for i in range(1, len(df)):
         current_time = df.index[i]
-        current_close = float(df.iloc[i]['close'])
-        current_high = float(df.iloc[i]['high'])
-        current_low = float(df.iloc[i]['low'])
+        current_close = float(close_arr[i])
+        current_high = float(high_arr[i])
+        current_low = float(low_arr[i])
         current_time_only = current_time.time()
         
         if in_position:
