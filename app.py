@@ -6,7 +6,7 @@ import yfinance as yf
 from datetime import datetime, timedelta
 
 # --- PAGE SETUP ---
-st.set_page_config(page_title="Nifty Live Backtester", layout="wide")
+st.set_set_config = st.set_page_config(page_title="Nifty Live Backtester", layout="wide")
 st.title("📊 Nifty 50 Live Historical Strategy Tester")
 st.write("Select a custom historical time window from the calendar to instantly fetch data and run the backtester.")
 
@@ -27,28 +27,24 @@ vol_multiplier = st.sidebar.slider("Volume Filter (Lower = More Trades)", 0.0, 2
 
 # --- BACKTEST CORE ENGINE ---
 def process_data(df, rrr, ema_len, vol_mult, setup_mode):
-    # ==========================================
-    # 🚨 CRITICAL FIX: CLEAN AND EXTRACT TUPLES
-    # ==========================================
-    if isinstance(df.columns, pd.MultiIndex):
-        # Extract just the first word from the MultiIndex tuple, e.g., ('Open', '^NSEI') -> 'open'
-        df.columns = [str(col[0]).lower() for col in df.columns]
-    else:
-        # Standard Index handling
-        df.columns = [str(col).lower() for col in df.columns]
+    # CRITICAL FIX: Clean and un-nest Yahoo Finance Column levels properly
+    clean_cols = []
+    for col in df.columns:
+        if isinstance(col, tuple):
+            clean_cols.append(str(col[0]).lower())
+        else:
+            clean_cols.append(str(col).lower())
+    df.columns = clean_cols
     
-    # Strip unnecessary overhead columns and keep only the core OHLCV matrix
-    available_cols = list(df.columns)
     needed_cols = ['open', 'high', 'low', 'close', 'volume']
+    available_cols = list(df.columns)
     
-    # Verify all columns are present before slicing to avoid key errors
     if not all(col in available_cols for col in needed_cols):
         st.error(f"Data mapping error. Extracted columns were: {available_cols}")
         return df, pd.DataFrame()
         
     df = df[needed_cols].dropna().copy()
     
-    # Force float values to avoid array manipulation data type bugs
     for col in needed_cols:
         df[col] = df[col].astype(float)
         
@@ -63,7 +59,7 @@ def process_data(df, rrr, ema_len, vol_mult, setup_mode):
     df['vol_sma'] = df['volume'].rolling(window=10).mean()
     df['volume_spike'] = df['volume'] > (df['vol_sma'] * vol_mult)
     
-    # Extract Raw Floating NumPy Arrays for Pattern Parsing
+    # Extract Raw NumPy Arrays
     open_arr = df['open'].to_numpy()
     high_arr = df['high'].to_numpy()
     low_arr = df['low'].to_numpy()
@@ -72,13 +68,12 @@ def process_data(df, rrr, ema_len, vol_mult, setup_mode):
     body = np.abs(close_arr - open_arr)
     candle_range = high_arr - low_arr
     
-    # Shift arrays manually using rolling configurations to escape indexing traps
     prev_open = np.zeros_like(open_arr)
     prev_close = np.zeros_like(close_arr)
     prev_open[1:] = open_arr[:-1]
     prev_close[1:] = close_arr[:-1]
     
-    # 1. Pattern Logic Arrays
+    # Pattern Logic
     bull_eng = (close_arr > open_arr) & (prev_close < prev_open) & (open_arr <= prev_close) & (close_arr >= prev_open)
     bear_eng = (close_arr < open_arr) & (prev_close > prev_open) & (open_arr >= prev_close) & (close_arr <= prev_open)
     
@@ -179,3 +174,4 @@ else:
         else:
             st.warning(f"⚠️ Data parsed ({len(results_df)} candles), but no individual setups triggered a trade. Slide your Volume Filter in the sidebar to 0.0 to check candlestick matching directly.")
     else:
+        st.info("No data fetched. Ensure your date boundaries fall within the trailing 60 days.")
