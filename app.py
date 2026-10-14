@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 # --- PAGE SETUP ---
 st.set_page_config(page_title="Nifty Live Backtester", layout="wide")
-st.title("🦅 Nifty 50 Live Historical Strategy Tester")
+st.title("📊 Nifty 50 Live Historical Strategy Tester")
 st.write("Select a custom historical time window from the calendar to instantly fetch data and run the backtester.")
 
 # --- SIDEBAR: DYNAMIC DATE & STRATEGY CONTROLS ---
@@ -27,19 +27,32 @@ vol_multiplier = st.sidebar.slider("Volume Filter (Lower = More Trades)", 0.0, 2
 
 # --- BACKTEST CORE ENGINE ---
 def process_data(df, rrr, ema_len, vol_mult, setup_mode):
-    # CRITICAL MULTIINDEX CLEANUP: Flatten any multi-level columns from yfinance
+    # ==========================================
+    # 🚨 CRITICAL FIX: CLEAN AND EXTRACT TUPLES
+    # ==========================================
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [col[0] for col in df.columns]
+        # Extract just the first word from the MultiIndex tuple, e.g., ('Open', '^NSEI') -> 'open'
+        df.columns = [str(col[0]).lower() for col in df.columns]
+    else:
+        # Standard Index handling
+        df.columns = [str(col).lower() for col in df.columns]
     
-    # Standardize column headers and drop empty data rows
-    df.columns = [str(col).lower() for col in df.columns]
-    df = df[['open', 'high', 'low', 'close', 'volume']].dropna().copy()
+    # Strip unnecessary overhead columns and keep only the core OHLCV matrix
+    available_cols = list(df.columns)
+    needed_cols = ['open', 'high', 'low', 'close', 'volume']
     
-    # Convert series explicitly to float64 to prevent matrix mismatch errors
-    for col in ['open', 'high', 'low', 'close', 'volume']:
+    # Verify all columns are present before slicing to avoid key errors
+    if not all(col in available_cols for col in needed_cols):
+        st.error(f"Data mapping error. Extracted columns were: {available_cols}")
+        return df, pd.DataFrame()
+        
+    df = df[needed_cols].dropna().copy()
+    
+    # Force float values to avoid array manipulation data type bugs
+    for col in needed_cols:
         df[col] = df[col].astype(float)
         
-    # Technical Indicators
+    # Technical Indicators Calculations
     df['ema_20'] = df['close'].ewm(span=ema_len, adjust=False).mean()
     df['date_group'] = df.index.date
     typical_price = (df['high'] + df['low'] + df['close']) / 3.0
@@ -50,7 +63,7 @@ def process_data(df, rrr, ema_len, vol_mult, setup_mode):
     df['vol_sma'] = df['volume'].rolling(window=10).mean()
     df['volume_spike'] = df['volume'] > (df['vol_sma'] * vol_mult)
     
-    # Structural Candlestick Array Math
+    # Extract Raw Floating NumPy Arrays for Pattern Parsing
     open_arr = df['open'].to_numpy()
     high_arr = df['high'].to_numpy()
     low_arr = df['low'].to_numpy()
@@ -59,9 +72,11 @@ def process_data(df, rrr, ema_len, vol_mult, setup_mode):
     body = np.abs(close_arr - open_arr)
     candle_range = high_arr - low_arr
     
-    # Shift arrays manually to avoid pandas alignment index traps
-    prev_open = np.roll(open_arr, 1)
-    prev_close = np.roll(close_arr, 1)
+    # Shift arrays manually using rolling configurations to escape indexing traps
+    prev_open = np.zeros_like(open_arr)
+    prev_close = np.zeros_like(close_arr)
+    prev_open[1:] = open_arr[:-1]
+    prev_close[1:] = close_arr[:-1]
     
     # 1. Pattern Logic Arrays
     bull_eng = (close_arr > open_arr) & (prev_close < prev_open) & (open_arr <= prev_close) & (close_arr >= prev_open)
@@ -164,4 +179,3 @@ else:
         else:
             st.warning(f"⚠️ Data parsed ({len(results_df)} candles), but no individual setups triggered a trade. Slide your Volume Filter in the sidebar to 0.0 to check candlestick matching directly.")
     else:
-        st.info("No data fetched. Ensure your date boundaries fall within the trailing 60 days.")
