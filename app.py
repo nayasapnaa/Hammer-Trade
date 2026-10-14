@@ -27,10 +27,13 @@ ema_length = st.sidebar.number_input("EMA Length", min_value=5, max_value=50, va
 # --- BACKTEST CORE ENGINE ---
 def process_data(raw_df, rrr, ema_len, setup_mode):
     flat_data = {}
+    
+    # CRITICAL EXTRACT FIX: Extract and flatten MultiIndex safely
     for col in raw_df.columns:
-        col_name = col.lower().strip() if isinstance(col, tuple) else str(col).lower().strip()
-        if col_name in ['open', 'high', 'low', 'close', 'volume']:
-            flat_data[col_name] = raw_df[col].to_numpy().flatten().astype(float)
+        # Convert to string first to prevent tuple object AttributeError
+        col_str = str(col[0] if isinstance(col, tuple) else col).lower().strip()
+        if col_str in ['open', 'high', 'low', 'close', 'volume']:
+            flat_data[col_str] = raw_df[col].to_numpy().flatten().astype(float)
 
     df = pd.DataFrame(flat_data, index=raw_df.index).dropna()
     
@@ -89,7 +92,7 @@ def process_data(raw_df, rrr, ema_len, setup_mode):
         current_time = df.index[i]
         current_close = float(df.iloc[i]['close'])
         
-        # --- SCAN EXTRIES ONLY IF NO OPEN POSITION IS ACTIVE ---
+        # --- SCAN ENTRIES ONLY IF NO OPEN POSITION IS ACTIVE ---
         if not in_position:
             current_ema = float(df.iloc[i]['ema_20'])
             current_vwap = float(df.iloc[i]['vwap'])
