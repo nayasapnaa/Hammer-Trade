@@ -27,31 +27,29 @@ ema_length = st.sidebar.number_input("EMA Length", min_value=5, max_value=50, va
 # --- BACKTEST CORE ENGINE ---
 def process_data(raw_df, rrr, ema_len, setup_mode):
     # ==============================================================
-    # 🚨 BULLETPROOF UN-NESTING FIX (Isolates index 0 of MultiIndex tuple)
+    # 🚨 BULLETPROOF COLUMNS EXTRACTOR (Handles tuples securely)
     # ==============================================================
     flat_data = {}
     for col in raw_df.columns:
-        if isinstance(col, tuple):
-            name = str(col[0]).lower().strip()
-        else:
-            name = str(col).lower().strip()
-            
+        # Extract string if it is a MultiIndex tuple, otherwise force to flat string
+        name = col[0].lower().strip() if isinstance(col, tuple) else str(col).lower().strip()
         if name in ['open', 'high', 'low', 'close', 'volume']:
             flat_data[name] = raw_df[col].to_numpy().flatten().astype(float)
-
-    # Reassemble a flat single-level column DataFrame
+            
+    # Reassemble a completely standard flat single-level column DataFrame
     df = pd.DataFrame(flat_data, index=raw_df.index).dropna()
     
     if df.empty or len(df) < 10:
         return df, pd.DataFrame()
 
+    # Extract clean 1D arrays for pure math operations
     open_arr = df['open'].to_numpy()
     high_arr = df['high'].to_numpy()
     low_arr = df['low'].to_numpy()
     close_arr = df['close'].to_numpy()
     volume_arr = df['volume'].to_numpy()
 
-    # Technical Indicators Calculations
+    # Technical Indicators Calculations (Calculated on standardized flat float fields)
     df['ema_20'] = df['close'].ewm(span=ema_len, adjust=False).mean()
     df['date_group'] = df.index.date
     
@@ -61,25 +59,25 @@ def process_data(raw_df, rrr, ema_len, setup_mode):
     df['cum_vol'] = df.groupby('date_group')['volume'].cumsum()
     df['vwap'] = df['cum_tp_vol'] / df['cum_vol']
     
-    # Candle Dimensions
+    # Core Pattern Geometry Formulas
     body = np.abs(close_arr - open_arr)
     candle_range = high_arr - low_arr
-    body_eps = np.where(body == 0, 0.001, body)
+    body_eps = np.where(body == 0, 0.001, body)  # Prevent division by zero errors
     
     prev_open = np.zeros_like(open_arr)
     prev_close = np.zeros_like(close_arr)
     prev_open[1:] = open_arr[:-1]
     prev_close[1:] = close_arr[:-1]
     
-    # Structural Candlestick Pattern Logic
+    # Mathematical definitions for high frequency candle triggers
     bull_eng = (close_arr > open_arr) & (prev_close < prev_open) & (open_arr <= prev_close) & (close_arr >= prev_open)
     bear_eng = (close_arr < open_arr) & (prev_close > prev_open) & (open_arr >= prev_close) & (close_arr <= prev_open)
     
     lower_shadow = np.where(close_arr > open_arr, open_arr - low_arr, close_arr - low_arr)
     upper_shadow = np.where(close_arr > open_arr, high_arr - close_arr, high_arr - open_arr)
     
-    bull_hammer = (lower_shadow > (1.0 * body_eps)) & (upper_shadow < (0.8 * body_eps))
-    bear_star = (upper_shadow > (1.0 * body_eps)) & (lower_shadow < (0.8 * body_eps))
+    bull_hammer = (lower_shadow > (1.1 * body_eps)) & (upper_shadow < (0.6 * body_eps))
+    bear_star = (upper_shadow > (1.1 * body_eps)) & (lower_shadow < (0.6 * body_eps))
     
     if setup_mode == "Only Engulfing":
         df['is_bull'], df['is_bear'] = bull_eng, bear_eng
@@ -94,12 +92,12 @@ def process_data(raw_df, rrr, ema_len, setup_mode):
     entry_index = 0
     df['signal'] = "HOLD"
     
-    # Execution Loop
+    # Optimized Strategy Trade Simulation Loop
     for i in range(1, len(df)):
         current_time = df.index[i]
         current_close = float(df.iloc[i]['close'])
         
-        # --- SCAN ENTRIES ONLY IF NO OPEN POSITION IS ACTIVE ---
+        # --- SCAN ENTRIES ONLY IF NO POSITION IS CURRENTLY ACTIVE ---
         if not in_position:
             current_ema = float(df.iloc[i]['ema_20'])
             current_vwap = float(df.iloc[i]['vwap'])
@@ -110,7 +108,6 @@ def process_data(raw_df, rrr, ema_len, setup_mode):
                 sl_price = float(df.iloc[i]['low'])
                 tp_price = entry_price + ((entry_price - sl_price) * rrr)
                 entry_time, entry_index = current_time, i
-                
             elif bool(df.iloc[i]['is_bear']) and (current_close < current_ema) and (current_close < current_vwap):
                 df.iloc[i, df.columns.get_loc('signal')] = "BUY PUT (PE)"
                 in_position, pos_type, entry_price = True, "PE", current_close
@@ -133,7 +130,6 @@ def process_data(raw_df, rrr, ema_len, setup_mode):
                 elif candle_count >= 5:
                     trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "CALL (CE)", "Entry": entry_price, "Exit": current_close, "P&L Points": round(current_close - entry_price, 2), "Outcome": "TIME OUT"})
                     in_position = False
-                    
             elif pos_type == "PE":
                 if float(df.iloc[i]['high']) >= sl_price:
                     trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "PUT (PE)", "Entry": entry_price, "Exit": sl_price, "P&L Points": round(entry_price - sl_price, 2), "Outcome": "STOP LOSS"})
@@ -182,4 +178,3 @@ else:
         else:
             st.warning(f"⚠️ Data parsed ({len(results_df)} candles), but no trades triggered. Try widening your date duration to scan a larger market window.")
     else:
-        st.info("No data fetched. Ensure your date boundaries fall within the trailing 60 days.")
