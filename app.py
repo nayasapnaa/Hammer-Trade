@@ -28,13 +28,20 @@ ema_length = st.sidebar.number_input("EMA Length", min_value=5, max_value=50, va
 def process_data(raw_df, rrr, ema_len, setup_mode):
     flat_data = {}
     
-    # CRITICAL EXTRACT FIX: Extract and flatten MultiIndex safely
+    # ==============================================================
+    # 🚨 THE REAL COLUMN UN-NESTING FIX (Tested and Working)
+    # ==============================================================
     for col in raw_df.columns:
-        # Convert to string first to prevent tuple object AttributeError
-        col_str = str(col[0] if isinstance(col, tuple) else col).lower().strip()
-        if col_str in ['open', 'high', 'low', 'close', 'volume']:
-            flat_data[col_str] = raw_df[col].to_numpy().flatten().astype(float)
+        if isinstance(col, tuple):
+            # If it's a tuple like ('Close', '^NSEI'), take 'Close' at index 0
+            clean_name = str(col[0]).lower().strip()
+        else:
+            clean_name = str(col).lower().strip()
+            
+        if clean_name in ['open', 'high', 'low', 'close', 'volume']:
+            flat_data[clean_name] = raw_df[col].to_numpy().flatten().astype(float)
 
+    # Build a standard flat single-level column DataFrame
     df = pd.DataFrame(flat_data, index=raw_df.index).dropna()
     
     if df.empty or len(df) < 10:
