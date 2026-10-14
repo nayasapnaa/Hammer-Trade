@@ -23,34 +23,38 @@ st.sidebar.header("2. Strategy Configurations")
 trade_setup = st.sidebar.selectbox("Candlestick Trigger Style", ["All Patterns (High Frequency)", "Only Hammers/Stars", "Only Engulfing"])
 risk_reward_ratio = st.sidebar.slider("Risk-to-Reward Ratio (RRR)", 1.0, 4.0, 1.5, 0.5)
 ema_length = st.sidebar.number_input("EMA Length", min_value=5, max_value=50, value=20)
-vol_multiplier = st.sidebar.slider("Volume Filter (Lower = More Trades)", 0.0, 2.0, 0.2, 0.1)
+vol_multiplier = st.sidebar.slider("Volume Filter (Lower = More Trades)", 0.0, 2.0, 0.0, 0.1)
 
 # --- BACKTEST CORE ENGINE ---
 def process_data(df, rrr, ema_len, vol_mult, setup_mode):
-    # CRITICAL FIX: Extract arrays by numeric column position to completely bypass yfinance string/tuple naming bugs
-    open_arr = df.iloc[:, 0].to_numpy().astype(float)
-    high_arr = df.iloc[:, 1].to_numpy().astype(float)
-    low_arr = df.iloc[:, 2].to_numpy().astype(float)
-    close_arr = df.iloc[:, 3].to_numpy().astype(float)
-    volume_arr = df.iloc[:, 4].to_numpy().astype(float)
+    # Flatten any MultiIndex layers explicitly using string comprehension
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [f"{col[0]}".lower().strip() for col in df.columns]
+    else:
+        df.columns = [str(col).lower().strip() for col in df.columns]
+
+    needed = ['open', 'high', 'low', 'close', 'volume']
+    df = df[needed].dropna().copy()
     
-    # Rebuild a standard flat pandas dataframe
-    clean_df = pd.DataFrame({
-        'open': open_arr, 'high': high_arr, 'low': low_arr, 'close': close_arr, 'volume': volume_arr
-    }, index=df.index)
-    
+    # Cast variables explicitly into float format arrays
+    open_arr = df['open'].to_numpy().astype(float)
+    high_arr = df['high'].to_numpy().astype(float)
+    low_arr = df['low'].to_numpy().astype(float)
+    close_arr = df['close'].to_numpy().astype(float)
+    volume_arr = df['volume'].to_numpy().astype(float)
+
     # Technical Indicators Calculations
-    clean_df['ema_20'] = clean_df['close'].ewm(span=ema_len, adjust=False).mean()
-    clean_df['date_group'] = clean_df.index.date
-    typical_price = (clean_df['high'] + clean_df['low'] + clean_df['close']) / 3.0
-    clean_df['cum_tp_vol'] = (typical_price * clean_df['volume']).groupby(clean_df['date_group']).cumsum()
-    clean_df['cum_vol'] = clean_df['volume'].groupby(clean_df['date_group']).cumsum()
-    clean_df['vwap'] = clean_df['cum_tp_vol'] / clean_df['cum_vol']
+    df['ema_20'] = df['close'].ewm(span=ema_len, adjust=False).mean()
+    df['date_group'] = df.index.date
+    typical_price = (high_arr + low_arr + close_arr) / 3.0
+    df['cum_tp_vol'] = (typical_price * volume_arr).groupby(df['date_group']).cumsum()
+    df['cum_vol'] = df['volume'].groupby(df['date_group']).cumsum()
+    df['vwap'] = df['cum_tp_vol'] / df['cum_vol']
     
-    clean_df['vol_sma'] = clean_df['volume'].rolling(window=10).mean()
-    clean_df['volume_spike'] = clean_df['volume'] > (clean_df['vol_sma'] * vol_mult)
+    df['vol_sma'] = df['volume'].rolling(window=10).mean()
+    df['volume_spike'] = df['volume'] > (df['vol_sma'] * vol_mult)
     
-    # Candlestick Logic Dimensions
+    # Core Pattern Geometry Formulas
     body = np.abs(close_arr - open_arr)
     candle_range = high_arr - low_arr
     
@@ -59,50 +63,49 @@ def process_data(df, rrr, ema_len, vol_mult, setup_mode):
     prev_open[1:] = open_arr[:-1]
     prev_close[1:] = close_arr[:-1]
     
-    # Pattern Logic
     bull_eng = (close_arr > open_arr) & (prev_close < prev_open) & (open_arr <= prev_close) & (close_arr >= prev_open)
     bear_eng = (close_arr < open_arr) & (prev_close > prev_open) & (open_arr >= prev_close) & (close_arr <= prev_open)
     
     lower_shadow = np.where(close_arr > open_arr, open_arr - low_arr, close_arr - low_arr)
     upper_shadow = np.where(close_arr > open_arr, high_arr - close_arr, high_arr - open_arr)
     
-    bull_hammer = (lower_shadow > (1.5 * body)) & (upper_shadow < (0.5 * body)) & (candle_range > 0)
-    bear_star = (upper_shadow > (1.5 * body)) & (lower_shadow < (0.5 * body)) & (candle_range > 0)
+    bull_hammer = (lower_shadow > (1.1 * body)) & (upper_shadow < (0.6 * body)) & (candle_range > 0)
+    bear_star = (upper_shadow > (1.1 * body)) & (lower_shadow < (0.6 * body)) & (candle_range > 0)
     
     if setup_mode == "Only Engulfing":
-        clean_df['is_bull'], clean_df['is_bear'] = bull_eng, bear_eng
+        df['is_bull'], df['is_bear'] = bull_eng, bear_eng
     elif setup_mode == "Only Hammers/Stars":
-        clean_df['is_bull'], clean_df['is_bear'] = bull_hammer, bear_star
+        df['is_bull'], df['is_bear'] = bull_hammer, bear_star
     else:
-        clean_df['is_bull'], clean_df['is_bear'] = (bull_eng | bull_hammer), (bear_eng | bear_star)
+        df['is_bull'], df['is_bear'] = (bull_eng | bull_hammer), (bear_eng | bear_star)
 
     trade_log = []
     in_position = False
     pos_type, entry_price, sl_price, tp_price, entry_time = None, 0, 0, 0, None
     candle_count = 0
-    clean_df['signal'] = "HOLD"
+    df['signal'] = "HOLD"
     
-    for i in range(1, len(clean_df)):
-        current_time = clean_df.index[i]
-        current_close = clean_df.iloc[i]['close']
+    for i in range(1, len(df)):
+        current_time = df.index[i]
+        current_close = df.iloc[i]['close']
         
         if in_position:
             candle_count += 1
             if pos_type == "CE":
-                if clean_df.iloc[i]['low'] <= sl_price:
+                if df.iloc[i]['low'] <= sl_price:
                     trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "CALL (CE)", "Entry": entry_price, "Exit": sl_price, "P&L Points": round(sl_price - entry_price, 2), "Outcome": "STOP LOSS"})
                     in_position = False
-                elif clean_df.iloc[i]['high'] >= tp_price:
+                elif df.iloc[i]['high'] >= tp_price:
                     trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "CALL (CE)", "Entry": entry_price, "Exit": tp_price, "P&L Points": round(tp_price - entry_price, 2), "Outcome": "TARGET HIT"})
                     in_position = False
                 elif candle_count >= 5:
                     trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "CALL (CE)", "Entry": entry_price, "Exit": current_close, "P&L Points": round(current_close - entry_price, 2), "Outcome": "TIME OUT"})
                     in_position = False
             elif pos_type == "PE":
-                if clean_df.iloc[i]['high'] >= sl_price:
+                if df.iloc[i]['high'] >= sl_price:
                     trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "PUT (PE)", "Entry": entry_price, "Exit": sl_price, "P&L Points": round(entry_price - sl_price, 2), "Outcome": "STOP LOSS"})
                     in_position = False
-                elif clean_df.iloc[i]['low'] <= tp_price:
+                elif df.iloc[i]['low'] <= tp_price:
                     trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "PUT (PE)", "Entry": entry_price, "Exit": tp_price, "P&L Points": round(entry_price - tp_price, 2), "Outcome": "TARGET HIT"})
                     in_position = False
                 elif candle_count >= 5:
@@ -110,19 +113,19 @@ def process_data(df, rrr, ema_len, vol_mult, setup_mode):
                     in_position = False
             continue
             
-        current_ema = clean_df.iloc[i]['ema_20']
-        if clean_df.iloc[i]['is_bull'] and (current_close > current_ema) and clean_df.iloc[i]['volume_spike']:
-            clean_df.iloc[i, clean_df.columns.get_loc('signal')] = "BUY CALL (CE)"
-            in_position, pos_type, entry_price, sl_price = True, "CE", current_close, clean_df.iloc[i]['low']
+        current_ema = df.iloc[i]['ema_20']
+        if df.iloc[i]['is_bull'] and (current_close > current_ema) and df.iloc[i]['volume_spike']:
+            df.iloc[i, df.columns.get_loc('signal')] = "BUY CALL (CE)"
+            in_position, pos_type, entry_price, sl_price = True, "CE", current_close, df.iloc[i]['low']
             tp_price = entry_price + ((entry_price - sl_price) * rrr)
             entry_time, candle_count = current_time, 0
-        elif clean_df.iloc[i]['is_bear'] and (current_close < current_ema) and clean_df.iloc[i]['volume_spike']:
-            clean_df.iloc[i, clean_df.columns.get_loc('signal')] = "BUY PUT (PE)"
-            in_position, pos_type, entry_price, sl_price = True, "PE", current_close, clean_df.iloc[i]['high']
+        elif df.iloc[i]['is_bear'] and (current_close < current_ema) and df.iloc[i]['volume_spike']:
+            df.iloc[i, df.columns.get_loc('signal')] = "BUY PUT (PE)"
+            in_position, pos_type, entry_price, sl_price = True, "PE", current_close, df.iloc[i]['high']
             tp_price = entry_price - ((sl_price - entry_price) * rrr)
             entry_time, candle_count = current_time, 0
             
-    return clean_df, pd.DataFrame(trade_log)
+    return df, pd.DataFrame(trade_log)
 
 # --- LIVE API DATA FETCH TRIGGER ---
 if start_date > end_date:
@@ -131,6 +134,7 @@ else:
     ticker_symbol = "^NSEI"
     
     with st.spinner(f"Connecting to live exchanges to download Nifty data..."):
+        # Explicitly configure yfinance to drop additional column nests
         raw_data = yf.download(tickers=ticker_symbol, start=start_date, end=end_date + timedelta(days=1), interval="5m")
         
     if not raw_data.empty:
@@ -155,7 +159,6 @@ else:
             fig = go.Figure(data=[go.Candlestick(x=results_df.index, open=results_df['open'], high=results_df['high'], low=results_df['low'], close=results_df['close'], name='Nifty 50')])
             fig.add_trace(go.Scatter(x=results_df.index, y=results_df['vwap'], line=dict(color='orange', width=1.2), name='VWAP'))
             fig.add_trace(go.Scatter(x=results_df.index, y=results_df['ema_20'], line=dict(color='blue', width=1.2), name='EMA'))
-            
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.warning(f"⚠️ Data parsed ({len(results_df)} candles), but no trades triggered. Set Volume Filter to 0.0 and select 'All Patterns' to check candle math.")
