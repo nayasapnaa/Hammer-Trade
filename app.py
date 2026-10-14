@@ -15,20 +15,25 @@ st.sidebar.header("1. Choose Time Duration")
 
 # Set default date limits (yfinance provides 5-min intraday data up to the last 60 days)
 max_date = datetime.today().date()
-min_date = max_date - timedelta(days=59)
+min_date = max_date - timedelta(days=25)  # Start with a safe 3-week lookback window
 
-start_date = st.sidebar.date_input("Start Date", value=min_date, min_value=min_date, max_value=max_date)
-end_date = st.sidebar.date_input("End Date", value=max_date, min_value=min_date, max_value=max_date)
+start_date = st.sidebar.date_input("Start Date", value=min_date, min_value=max_date - timedelta(days=59), max_value=max_date)
+end_date = st.sidebar.date_input("End Date", value=max_date, min_value=max_date - timedelta(days=59), max_value=max_date)
 
 st.sidebar.header("2. Strategy Configurations")
 trade_setup = st.sidebar.selectbox("Candlestick Trigger Style", ["All Patterns (High Frequency)", "Only Hammers/Stars", "Only Engulfing"])
 risk_reward_ratio = st.sidebar.slider("Risk-to-Reward Ratio (RRR)", 1.0, 4.0, 1.5, 0.5)
 ema_length = st.sidebar.number_input("EMA Length", min_value=5, max_value=50, value=20)
-vol_multiplier = st.sidebar.slider("Volume Filter (Lower = More Trades)", 0.2, 2.0, 0.7, 0.1)
+vol_multiplier = st.sidebar.slider("Volume Filter (Lower = More Trades)", 0.1, 2.0, 0.5, 0.1)
 
 # --- BACKTEST CORE ENGINE ---
 def process_data(df, rrr, ema_len, vol_mult, setup_mode):
-    df.columns = [col.lower() for col in df.columns]
+    # CRITICAL FIX: Explicitly handle both MultiIndex and standard column structures
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    
+    # Force column names to lower case to eliminate name mismatches
+    df.columns = [str(col).lower() for col in df.columns]
     
     # Technical Indicators
     df['ema_20'] = df['close'].ewm(span=ema_len, adjust=False).mean()
@@ -116,18 +121,14 @@ def process_data(df, rrr, ema_len, vol_mult, setup_mode):
 if start_date > end_date:
     st.error("Error: Start Date must be prior to End Date.")
 else:
-    # yfinance uses ^NSEI ticker symbol for the Nifty 50 Index
     ticker_symbol = "^NSEI"
     
-    with st.spinner(f"Connecting to live exchanges to download Nifty data from {start_date} to {end_date}..."):
+    with st.spinner(f"Connecting to live exchanges to download Nifty data..."):
         # Fetching 5-minute data chunks from Yahoo Finance
         raw_data = yf.download(tickers=ticker_symbol, start=start_date, end=end_date + timedelta(days=1), interval="5m")
         
     if not raw_data.empty:
-        # Convert MultiIndex columns if present in yfinance outputs
-        if isinstance(raw_data.columns, pd.MultiIndex):
-            raw_data.columns = raw_data.columns.get_level_values(0)
-            
+        # Run Strategy Processing Engine
         results_df, trades_df = process_data(raw_data.copy(), risk_reward_ratio, ema_length, vol_multiplier, trade_setup)
         
         if not trades_df.empty:
@@ -138,7 +139,7 @@ else:
             col1.metric("Total Executed Trades", len(trades_df))
             col2.metric("Win Rate (%)", f"{win_rate:.1f}%")
             col3.metric("Net Strategy Points", f"{trades_df['P&L Points'].sum():+.2f}")
-            col4.metric("Trading Windows Tracked", f"{len(results_df)} Candles")
+            col4.metric("Trading Candles Processed", f"{len(results_df)}")
             
             # Closed Trades Table Logging
             st.subheader("📋 Closed Trade Performance Sheet")
@@ -161,6 +162,6 @@ else:
             fig.update_layout(xaxis_rangeslider_visible=False, height=550)
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.warning("⚠️ No trades found matching these constraints. Lower your volume slider or increase your tracking duration.")
+            st.warning(f"⚠️ Data downloaded successfully ({len(results_df)} candles parsed), but no individual setups triggered a trade. Try reducing the Volume Filter down to 0.1 or 0.2 to lower entry barriers.")
     else:
-        st.info("No data fetched. Ensure your date boundaries fall within the maximum limit (Yahoo Finance provides 5-min intervals within the trailing 60 days).")
+        st.info("No data fetched from the API. Make sure the date range you picked falls within the past 60 days, and that it includes working market weekdays.")
