@@ -32,11 +32,10 @@ ema_length = st.sidebar.number_input("EMA Length", min_value=5, max_value=50, va
 # ⚙️ BACKTEST CORE ENGINE
 # ==============================================================
 def process_data(raw_df, rrr, ema_len, setup_mode):
-    # Safely extract column name whether column is a tuple or string
+    # Extract top-level field name whether column is a MultiIndex tuple or standard string
     flat_data = {}
     for col in raw_df.columns:
-        col_name = col[0] if isinstance(col, tuple) else col
-        name = str(col_name).lower().strip()
+        name = col.lower().strip() if isinstance(col, tuple) else str(col).lower().strip()
         if name in ['open', 'high', 'low', 'close', 'volume']:
             flat_data[name] = raw_df[col].to_numpy().flatten().astype(float)
 
@@ -49,6 +48,7 @@ def process_data(raw_df, rrr, ema_len, setup_mode):
     if df.index.tz is not None:
         df.index = df.index.tz_convert('Asia/Kolkata')
 
+    # Extract 1D arrays for numeric operations
     open_arr = df['open'].to_numpy()
     high_arr = df['high'].to_numpy()
     low_arr = df['low'].to_numpy()
@@ -59,7 +59,7 @@ def process_data(raw_df, rrr, ema_len, setup_mode):
     df['ema_20'] = df['close'].ewm(span=ema_len, adjust=False).mean()
     df['date_group'] = df.index.date
 
-    # Intraday VWAP
+    # Intraday VWAP Calculation
     typical_price = (high_arr + low_arr + close_arr) / 3.0
     df['tp_vol'] = typical_price * volume_arr
     df['cum_tp_vol'] = df.groupby('date_group')['tp_vol'].cumsum()
@@ -83,15 +83,15 @@ def process_data(raw_df, rrr, ema_len, setup_mode):
     prev_open[1:] = open_arr[:-1]
     prev_close[1:] = close_arr[:-1]
 
+    # Pattern Conditions
     bull_eng = (close_arr > open_arr) & (prev_close < prev_open) & (open_arr <= prev_close) & (close_arr >= prev_open)
     bear_eng = (close_arr < open_arr) & (prev_close > prev_open) & (open_arr >= prev_close) & (close_arr <= prev_open)
 
     lower_shadow = np.where(close_arr > open_arr, open_arr - low_arr, close_arr - low_arr)
     upper_shadow = np.where(close_arr > open_arr, high_arr - close_arr, high_arr - open_arr)
 
-    # Refined Candlestick Ratios
-    bull_hammer = (lower_shadow >= (1.5 * body_eps)) & (upper_shadow <= (0.5 * body_eps))
-    bear_star = (upper_shadow >= (1.5 * body_eps)) & (lower_shadow <= (0.5 * body_eps))
+    bull_hammer = (lower_shadow >= (1.2 * body_eps)) & (upper_shadow <= (0.6 * body_eps))
+    bear_star = (upper_shadow >= (1.2 * body_eps)) & (lower_shadow <= (0.6 * body_eps))
 
     if setup_mode == "Only Engulfing":
         df['is_bull'], df['is_bear'] = bull_eng, bear_eng
@@ -107,7 +107,7 @@ def process_data(raw_df, rrr, ema_len, setup_mode):
     df['signal'] = "HOLD"
 
     t_start = time(9, 30)
-    t_end = time(14, 45)
+    t_end = time(15, 0)
 
     is_bull_arr = df['is_bull'].to_numpy()
     is_bear_arr = df['is_bear'].to_numpy()
@@ -115,7 +115,7 @@ def process_data(raw_df, rrr, ema_len, setup_mode):
     vwap_arr = df['vwap'].to_numpy()
     atr_arr = df['atr'].to_numpy()
 
-    # Optimized Strategy Trade Simulation Loop
+    # Strategy Simulation Loop
     for i in range(1, len(df)):
         current_time = df.index[i]
         current_close = float(close_arr[i])
@@ -161,7 +161,7 @@ def process_data(raw_df, rrr, ema_len, setup_mode):
         vwap_ok_ce = (current_close > current_vwap)
         vwap_ok_pe = (current_close < current_vwap)
 
-        # CALL Entry Condition (EMA + VWAP Confluence)
+        # CALL Entry Condition (EMA + VWAP Trend Confluence)
         if bool(is_bull_arr[i]) and (current_close > current_ema) and vwap_ok_ce and in_time_win:
             df.at[current_time, 'signal'] = "BUY CALL (CE)"
             in_position, pos_type, entry_price = True, "CE", current_close
@@ -169,7 +169,7 @@ def process_data(raw_df, rrr, ema_len, setup_mode):
             tp_price = entry_price + ((entry_price - sl_price) * rrr)
             entry_time, candle_count = current_time, 0
 
-        # PUT Entry Condition (EMA + VWAP Confluence)
+        # PUT Entry Condition (EMA + VWAP Trend Confluence)
         elif bool(is_bear_arr[i]) and (current_close < current_ema) and vwap_ok_pe and in_time_win:
             df.at[current_time, 'signal'] = "BUY PUT (PE)"
             in_position, pos_type, entry_price = True, "PE", current_close
