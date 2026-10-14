@@ -25,24 +25,31 @@ risk_reward_ratio = st.sidebar.slider("Risk-to-Reward Ratio (RRR)", 1.0, 4.0, 1.
 ema_length = st.sidebar.number_input("EMA Length", min_value=5, max_value=50, value=20)
 
 # --- BACKTEST CORE ENGINE ---
-def process_data(df, rrr, ema_len, setup_mode):
-    # Step 1: Force column names to be flat strings
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [col[0].lower().strip() for col in df.columns]
-    else:
-        df.columns = [str(col).lower().strip() for col in df.columns]
-
-    needed = ['open', 'high', 'low', 'close', 'volume']
-    df = df[needed].dropna().copy()
+def process_data(raw_df, rrr, ema_len, setup_mode):
+    # ==============================================================
+    # 🚨 FIX: EXPLICITLY EXTRACT AND FLATTEN ALL YFINANCE COLUMNS
+    # ==============================================================
+    flat_data = {}
+    for col in raw_df.columns:
+        # Extract name layer whether column is a nested multi-index tuple or standard string
+        name = col[0].lower().strip() if isinstance(col, tuple) else str(col).lower().strip()
+        if name in ['open', 'high', 'low', 'close', 'volume']:
+            flat_data[name] = raw_df[col].to_numpy().flatten().astype(float)
+            
+    # Reassemble a completely standard flat single-level column DataFrame
+    df = pd.DataFrame(flat_data, index=raw_df.index).dropna()
     
-    # Cast variables explicitly into float format arrays
-    open_arr = df['open'].to_numpy().astype(float)
-    high_arr = df['high'].to_numpy().astype(float)
-    low_arr = df['low'].to_numpy().astype(float)
-    close_arr = df['close'].to_numpy().astype(float)
-    volume_arr = df['volume'].to_numpy().astype(float)
+    if df.empty or len(df) < 10:
+        return df, pd.DataFrame()
 
-    # Technical Indicators Calculations
+    # Extract clean 1D arrays for pure math operations
+    open_arr = df['open'].to_numpy()
+    high_arr = df['high'].to_numpy()
+    low_arr = df['low'].to_numpy()
+    close_arr = df['close'].to_numpy()
+    volume_arr = df['volume'].to_numpy()
+
+    # Technical Indicators Calculations (Calculated on standardized flat float fields)
     df['ema_20'] = df['close'].ewm(span=ema_len, adjust=False).mean()
     df['date_group'] = df.index.date
     
@@ -55,20 +62,22 @@ def process_data(df, rrr, ema_len, setup_mode):
     # Core Pattern Geometry Formulas
     body = np.abs(close_arr - open_arr)
     candle_range = high_arr - low_arr
+    body_eps = np.where(body == 0, 0.001, body)  # Prevent division by zero errors
     
     prev_open = np.zeros_like(open_arr)
     prev_close = np.zeros_like(close_arr)
     prev_open[1:] = open_arr[:-1]
     prev_close[1:] = close_arr[:-1]
     
+    # Mathematical definitions for high frequency candle triggers
     bull_eng = (close_arr > open_arr) & (prev_close < prev_open) & (open_arr <= prev_close) & (close_arr >= prev_open)
     bear_eng = (close_arr < open_arr) & (prev_close > prev_open) & (open_arr >= prev_close) & (close_arr <= prev_open)
     
     lower_shadow = np.where(close_arr > open_arr, open_arr - low_arr, close_arr - low_arr)
     upper_shadow = np.where(close_arr > open_arr, high_arr - close_arr, high_arr - open_arr)
     
-    bull_hammer = (lower_shadow > (1.1 * body)) & (upper_shadow < (0.6 * body)) & (candle_range > 0)
-    bear_star = (upper_shadow > (1.1 * body)) & (lower_shadow < (0.6 * body)) & (candle_range > 0)
+    bull_hammer = (lower_shadow > (1.1 * body_eps)) & (upper_shadow < (0.6 * body_eps))
+    bear_star = (upper_shadow > (1.1 * body_eps)) & (lower_shadow < (0.6 * body_eps))
     
     if setup_mode == "Only Engulfing":
         df['is_bull'], df['is_bear'] = bull_eng, bear_eng
@@ -83,6 +92,7 @@ def process_data(df, rrr, ema_len, setup_mode):
     candle_count = 0
     df['signal'] = "HOLD"
     
+    # Optimized Strategy Trade Simulation Loop
     for i in range(1, len(df)):
         current_time = df.index[i]
         current_close = float(df.iloc[i]['close'])
@@ -112,17 +122,18 @@ def process_data(df, rrr, ema_len, setup_mode):
             continue
             
         current_ema = float(df.iloc[i]['ema_20'])
-        current_vwap = float(df.iloc[i]['vwap'])
         
-        # Trend Filters with verified float extractions
-        if bool(df.iloc[i]['is_bull']) and (current_close > current_ema) and (current_close > current_vwap):
+        # Valid entry matching using clean floating-point numerical constraints
+        if bool(df.iloc[i]['is_bull']) and (current_close > current_ema):
             df.iloc[i, df.columns.get_loc('signal')] = "BUY CALL (CE)"
-            in_position, pos_type, entry_price, sl_price = True, "CE", current_close, float(df.iloc[i]['low'])
+            in_position, pos_type, entry_price = True, "CE", current_close
+            sl_price = float(df.iloc[i]['low'])
             tp_price = entry_price + ((entry_price - sl_price) * rrr)
             entry_time, candle_count = current_time, 0
-        elif bool(df.iloc[i]['is_bear']) and (current_close < current_ema) and (current_close < current_vwap):
+        elif bool(df.iloc[i]['is_bear']) and (current_close < current_ema):
             df.iloc[i, df.columns.get_loc('signal')] = "BUY PUT (PE)"
-            in_position, pos_type, entry_price, sl_price = True, "PE", current_close, float(df.iloc[i]['high'])
+            in_position, pos_type, entry_price = True, "PE", current_close
+            sl_price = float(df.iloc[i]['high'])
             tp_price = entry_price - ((sl_price - entry_price) * rrr)
             entry_time, candle_count = current_time, 0
             
@@ -135,8 +146,7 @@ else:
     ticker_symbol = "^NSEI"
     
     with st.spinner(f"Connecting to live exchanges to download Nifty data..."):
-        # Force single-level data naming by disabling multiindex options directly
-        raw_data = yf.download(tickers=ticker_symbol, start=start_date, end=end_date + timedelta(days=1), interval="5m", multi_level_index=False)
+        raw_data = yf.download(tickers=ticker_symbol, start=start_date, end=end_date + timedelta(days=1), interval="5m")
         
     if not raw_data.empty:
         results_df, trades_df = process_data(raw_data.copy(), risk_reward_ratio, ema_length, trade_setup)
