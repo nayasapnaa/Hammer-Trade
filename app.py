@@ -26,22 +26,20 @@ ema_length = st.sidebar.number_input("EMA Length", min_value=5, max_value=50, va
 
 # --- BACKTEST CORE ENGINE ---
 def process_data(raw_df, rrr, ema_len, setup_mode):
+    # ==============================================================
+    # 🚨 BULLETPROOF UN-NESTING FIX (Isolates index 0 of MultiIndex tuple)
+    # ==============================================================
     flat_data = {}
-    
-    # ==============================================================
-    # 🚨 THE REAL COLUMN UN-NESTING FIX (Tested and Working)
-    # ==============================================================
     for col in raw_df.columns:
         if isinstance(col, tuple):
-            # If it's a tuple like ('Close', '^NSEI'), take 'Close' at index 0
-            clean_name = str(col[0]).lower().strip()
+            name = str(col[0]).lower().strip()
         else:
-            clean_name = str(col).lower().strip()
+            name = str(col).lower().strip()
             
-        if clean_name in ['open', 'high', 'low', 'close', 'volume']:
-            flat_data[clean_name] = raw_df[col].to_numpy().flatten().astype(float)
+        if name in ['open', 'high', 'low', 'close', 'volume']:
+            flat_data[name] = raw_df[col].to_numpy().flatten().astype(float)
 
-    # Build a standard flat single-level column DataFrame
+    # Reassemble a flat single-level column DataFrame
     df = pd.DataFrame(flat_data, index=raw_df.index).dropna()
     
     if df.empty or len(df) < 10:
@@ -53,7 +51,7 @@ def process_data(raw_df, rrr, ema_len, setup_mode):
     close_arr = df['close'].to_numpy()
     volume_arr = df['volume'].to_numpy()
 
-    # Technical Indicators
+    # Technical Indicators Calculations
     df['ema_20'] = df['close'].ewm(span=ema_len, adjust=False).mean()
     df['date_group'] = df.index.date
     
@@ -73,14 +71,15 @@ def process_data(raw_df, rrr, ema_len, setup_mode):
     prev_open[1:] = open_arr[:-1]
     prev_close[1:] = close_arr[:-1]
     
+    # Structural Candlestick Pattern Logic
     bull_eng = (close_arr > open_arr) & (prev_close < prev_open) & (open_arr <= prev_close) & (close_arr >= prev_open)
     bear_eng = (close_arr < open_arr) & (prev_close > prev_open) & (open_arr >= prev_close) & (close_arr <= prev_open)
     
     lower_shadow = np.where(close_arr > open_arr, open_arr - low_arr, close_arr - low_arr)
     upper_shadow = np.where(close_arr > open_arr, high_arr - close_arr, high_arr - open_arr)
     
-    bull_hammer = (lower_shadow > (1.1 * body_eps)) & (upper_shadow < (0.6 * body_eps))
-    bear_star = (upper_shadow > (1.1 * body_eps)) & (lower_shadow < (0.6 * body_eps))
+    bull_hammer = (lower_shadow > (1.0 * body_eps)) & (upper_shadow < (0.8 * body_eps))
+    bear_star = (upper_shadow > (1.0 * body_eps)) & (lower_shadow < (0.8 * body_eps))
     
     if setup_mode == "Only Engulfing":
         df['is_bull'], df['is_bear'] = bull_eng, bear_eng
@@ -95,6 +94,7 @@ def process_data(raw_df, rrr, ema_len, setup_mode):
     entry_index = 0
     df['signal'] = "HOLD"
     
+    # Execution Loop
     for i in range(1, len(df)):
         current_time = df.index[i]
         current_close = float(df.iloc[i]['close'])
