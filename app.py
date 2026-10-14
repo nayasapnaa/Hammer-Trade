@@ -21,17 +21,17 @@ end_date = st.sidebar.date_input("End Date", value=max_date, min_value=max_date 
 
 st.sidebar.header("2. Strategy Configurations")
 trade_setup = st.sidebar.selectbox("Candlestick Trigger Style", ["All Patterns (High Frequency)", "Only Hammers/Stars", "Only Engulfing"])
-risk_reward_ratio = st.sidebar.slider("Risk-to-Reward Ratio (RRR)", 1.0, 4.0, 2.0, 0.5)
+risk_reward_ratio = st.sidebar.slider("Risk-to-Reward Ratio (RRR)", 1.0, 4.0, 1.5, 0.5)
 ema_length = st.sidebar.number_input("EMA Length", min_value=5, max_value=50, value=20)
 
 # --- BACKTEST CORE ENGINE ---
 def process_data(raw_df, rrr, ema_len, setup_mode):
     # ==============================================================
-    # 🚨 BULLETPROOF COLUMNS EXTRACTOR (Handles tuples securely)
+    # 🚨 FIX: EXPLICITLY EXTRACT AND FLATTEN ALL YFINANCE COLUMNS
     # ==============================================================
     flat_data = {}
     for col in raw_df.columns:
-        # Extract string if it is a MultiIndex tuple, otherwise force to flat string
+        # Extract name layer whether column is a nested multi-index tuple or standard string
         name = col[0].lower().strip() if isinstance(col, tuple) else str(col).lower().strip()
         if name in ['open', 'high', 'low', 'close', 'volume']:
             flat_data[name] = raw_df[col].to_numpy().flatten().astype(float)
@@ -89,7 +89,7 @@ def process_data(raw_df, rrr, ema_len, setup_mode):
     trade_log = []
     in_position = False
     pos_type, entry_price, sl_price, tp_price, entry_time = None, 0, 0, 0, None
-    entry_index = 0
+    candle_count = 0
     df['signal'] = "HOLD"
     
     # Optimized Strategy Trade Simulation Loop
@@ -97,29 +97,8 @@ def process_data(raw_df, rrr, ema_len, setup_mode):
         current_time = df.index[i]
         current_close = float(df.iloc[i]['close'])
         
-        # --- SCAN ENTRIES ONLY IF NO POSITION IS CURRENTLY ACTIVE ---
-        if not in_position:
-            current_ema = float(df.iloc[i]['ema_20'])
-            current_vwap = float(df.iloc[i]['vwap'])
-            
-            if bool(df.iloc[i]['is_bull']) and (current_close > current_ema) and (current_close > current_vwap):
-                df.iloc[i, df.columns.get_loc('signal')] = "BUY CALL (CE)"
-                in_position, pos_type, entry_price = True, "CE", current_close
-                sl_price = float(df.iloc[i]['low'])
-                tp_price = entry_price + ((entry_price - sl_price) * rrr)
-                entry_time, entry_index = current_time, i
-            elif bool(df.iloc[i]['is_bear']) and (current_close < current_ema) and (current_close < current_vwap):
-                df.iloc[i, df.columns.get_loc('signal')] = "BUY PUT (PE)"
-                in_position, pos_type, entry_price = True, "PE", current_close
-                sl_price = float(df.iloc[i]['high'])
-                tp_price = entry_price - ((sl_price - entry_price) * rrr)
-                entry_time, entry_index = current_time, i
-            continue
-
-        # --- EVALUATE CLOSING EXITS STARTING FROM THE NEXT CANDLE ONLY ---
-        if in_position and (i > entry_index):
-            candle_count = i - entry_index
-            
+        if in_position:
+            candle_count += 1
             if pos_type == "CE":
                 if float(df.iloc[i]['low']) <= sl_price:
                     trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "CALL (CE)", "Entry": entry_price, "Exit": sl_price, "P&L Points": round(sl_price - entry_price, 2), "Outcome": "STOP LOSS"})
@@ -140,6 +119,23 @@ def process_data(raw_df, rrr, ema_len, setup_mode):
                 elif candle_count >= 5:
                     trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "PUT (PE)", "Entry": entry_price, "Exit": current_close, "P&L Points": round(entry_price - current_close, 2), "Outcome": "TIME OUT"})
                     in_position = False
+            continue
+            
+        current_ema = float(df.iloc[i]['ema_20'])
+        
+        # Valid entry matching using clean floating-point numerical constraints
+        if bool(df.iloc[i]['is_bull']) and (current_close > current_ema):
+            df.iloc[i, df.columns.get_loc('signal')] = "BUY CALL (CE)"
+            in_position, pos_type, entry_price = True, "CE", current_close
+            sl_price = float(df.iloc[i]['low'])
+            tp_price = entry_price + ((entry_price - sl_price) * rrr)
+            entry_time, candle_count = current_time, 0
+        elif bool(df.iloc[i]['is_bear']) and (current_close < current_ema):
+            df.iloc[i, df.columns.get_loc('signal')] = "BUY PUT (PE)"
+            in_position, pos_type, entry_price = True, "PE", current_close
+            sl_price = float(df.iloc[i]['high'])
+            tp_price = entry_price - ((sl_price - entry_price) * rrr)
+            entry_time, candle_count = current_time, 0
             
     return df, pd.DataFrame(trade_log)
 
@@ -178,3 +174,4 @@ else:
         else:
             st.warning(f"⚠️ Data parsed ({len(results_df)} candles), but no trades triggered. Try widening your date duration to scan a larger market window.")
     else:
+        st.info("No data fetched. Ensure your date boundaries fall within the trailing 60 days.")
