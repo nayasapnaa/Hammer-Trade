@@ -4,129 +4,112 @@ import numpy as np
 import plotly.graph_objects as go
 
 # --- PAGE SETUP ---
-st.set_page_config(page_title="Nifty 50 Strategy Tester", layout="wide")
-st.title("📊 Nifty 50 5-Min Options Strategy Tester")
-st.write("Upload your 5-minute historical index data, adjust settings, and view exact Profit & Loss outputs instantly.")
+st.set_page_config(page_title="Nifty High-Frequency Tester", layout="wide")
+st.title("📊 Nifty 50 High-Frequency Strategy Tester")
+st.write("Optimized setup to capture higher intraday trade volumes using multiple candle triggers.")
 
-# --- SIDEBAR INTERFACE CONTROL ---
+# --- SIDEBAR CONTROL ---
 st.sidebar.header("Strategy Configurations")
-risk_reward_ratio = st.sidebar.slider("Risk-to-Reward Ratio (RRR)", 1.0, 4.0, 2.0, 0.5)
-vol_multiplier = st.sidebar.slider("Volume Spike Multiplier", 1.0, 3.0, 1.5, 0.1)
+trade_setup = st.sidebar.selectbox("Candlestick Trigger Style", ["All Patterns (High Frequency)", "Only Hammers/Stars", "Only Engulfing"])
+risk_reward_ratio = st.sidebar.slider("Risk-to-Reward Ratio (RRR)", 1.0, 4.0, 1.5, 0.5)
 ema_length = st.sidebar.number_input("EMA Length", min_value=5, max_value=50, value=20)
+vol_multiplier = st.sidebar.slider("Volume Filter (Lower = More Trades)", 0.5, 2.0, 0.8, 0.1)
 
-# --- ADVANCED TRADE SIMULATOR WITH PNL ---
-def process_data(df, rrr, vol_mult, ema_len):
+# --- ADVANCED HIGH FREQUENCY ENGINE ---
+def process_data(df, rrr, ema_len, vol_mult, setup_mode):
     df.columns = [col.lower() for col in df.columns]
     
-    # 1. Technical Indicators (Pure Pandas)
+    # Technical Indicators
     df['ema_20'] = df['close'].ewm(span=ema_len, adjust=False).mean()
     df['date_group'] = df.index.date
     typical_price = (df['high'] + df['low'] + df['close']) / 3.0
-    tp_vol = typical_price * df['volume']
-    df['cum_tp_vol'] = tp_vol.groupby(df['date_group']).cumsum()
+    df['cum_tp_vol'] = (typical_price * df['volume']).groupby(df['date_group']).cumsum()
     df['cum_vol'] = df['volume'].groupby(df['date_group']).cumsum()
     df['vwap'] = df['cum_tp_vol'] / df['cum_vol']
     
     df['vol_sma'] = df['volume'].rolling(window=10).mean()
     df['volume_spike'] = df['volume'] > (df['vol_sma'] * vol_mult)
     
-    # 2. Candle Patterns
+    # Candle Dimensions for Math Parsing
+    body = (df['close'] - df['open']).abs()
+    candle_range = df['high'] - df['low']
     df['prev_open'] = df['open'].shift(1)
     df['prev_close'] = df['close'].shift(1)
-    df['bullish_engulfing'] = (df['close'] > df['open']) & (df['prev_close'] < df['prev_open']) & (df['open'] <= df['prev_close']) & (df['close'] >= df['prev_open'])
-    df['bearish_engulfing'] = (df['close'] < df['open']) & (df['prev_close'] > df['prev_open']) & (df['open'] >= df['prev_close']) & (df['close'] <= df['prev_open'])
     
-    # 3. Initialize Arrays for Strategy Tracking
+    # 1. Engulfing Definitions
+    bull_eng = (df['close'] > df['open']) & (df['prev_close'] < df['prev_open']) & (df['open'] <= df['prev_close']) & (df['close'] >= df['prev_open'])
+    bear_eng = (df['close'] < df['open']) & (df['prev_close'] > df['prev_open']) & (df['open'] >= df['prev_close']) & (df['close'] <= df['prev_open'])
+    
+    # 2. Hammer / Shooting Star Definitions (Lower shadow or Upper shadow dominates)
+    lower_shadow = np.where(df['close'] > df['open'], df['open'] - df['low'], df['close'] - df['low'])
+    upper_shadow = np.where(df['close'] > df['open'], df['high'] - df['close'], df['high'] - df['open'])
+    
+    bull_hammer = (lower_shadow > (2 * body)) & (upper_shadow < (0.5 * body)) & (candle_range > 0)
+    bear_star = (upper_shadow > (2 * body)) & (lower_shadow < (0.5 * body)) & (candle_range > 0)
+    
+    # Filter selection based on UI input
+    if setup_mode == "Only Engulfing":
+        df['is_bull'] = bull_eng
+        df['is_bear'] = bear_eng
+    elif setup_mode == "Only Hammers/Stars":
+        df['is_bull'] = bull_hammer
+        df['is_bear'] = bear_star
+    else: # All Patterns
+        df['is_bull'] = bull_eng | bull_hammer
+        df['is_bear'] = bear_eng | bear_star
+
     trade_log = []
     in_position = False
-    pos_type = None  # "CE" or "PE"
-    entry_price = 0
-    sl_price = 0
-    tp_price = 0
-    entry_time = None
+    pos_type, entry_price, sl_price, tp_price, entry_time = None, 0, 0, 0, None
     candle_count = 0
-    
-    # Setup columns for visualization mapping
     df['signal'] = "HOLD"
     
     for i in range(1, len(df)):
         current_time = df.index[i]
-        current_open = df.iloc[i]['open']
-        current_high = df.iloc[i]['high']
-        current_low = df.iloc[i]['low']
         current_close = df.iloc[i]['close']
         
-        # --- IF WE ARE ALREADY IN A TRADE: TRACK EXIT CONDITIONS ---
         if in_position:
             candle_count += 1
-            
+            # Exit evaluation
             if pos_type == "CE":
-                # Check Stop Loss
-                if current_low <= sl_price:
-                    pnl = sl_price - entry_price
-                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "CALL (CE)", "Entry": entry_price, "Exit": sl_price, "P&L Points": round(pnl, 2), "Outcome": "STOP LOSS"})
+                if df.iloc[i]['low'] <= sl_price:
+                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "CALL (CE)", "Entry": entry_price, "Exit": sl_price, "P&L Points": round(sl_price - entry_price, 2), "Outcome": "STOP LOSS"})
                     in_position = False
-                # Check Target
-                elif current_high >= tp_price:
-                    pnl = tp_price - entry_price
-                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "CALL (CE)", "Entry": entry_price, "Exit": tp_price, "P&L Points": round(pnl, 2), "Outcome": "TARGET HIT"})
+                elif df.iloc[i]['high'] >= tp_price:
+                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "CALL (CE)", "Entry": entry_price, "Exit": tp_price, "P&L Points": round(tp_price - entry_price, 2), "Outcome": "TARGET HIT"})
                     in_position = False
-                # Check 15-Min Time limit (3 candles)
-                elif candle_count >= 3:
-                    pnl = current_close - entry_price
-                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "CALL (CE)", "Entry": entry_price, "Exit": current_close, "P&L Points": round(pnl, 2), "Outcome": "TIME OUT"})
+                elif candle_count >= 5: # Extended to 5 candles (25 mins) to give trades room
+                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "CALL (CE)", "Entry": entry_price, "Exit": current_close, "P&L Points": round(current_close - entry_price, 2), "Outcome": "TIME OUT"})
                     in_position = False
-                    
             elif pos_type == "PE":
-                # Check Stop Loss
-                if current_high >= sl_price:
-                    pnl = entry_price - sl_price
-                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "PUT (PE)", "Entry": entry_price, "Exit": sl_price, "P&L Points": round(pnl, 2), "Outcome": "STOP LOSS"})
+                if df.iloc[i]['high'] >= sl_price:
+                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "PUT (PE)", "Entry": entry_price, "Exit": sl_price, "P&L Points": round(entry_price - sl_price, 2), "Outcome": "STOP LOSS"})
                     in_position = False
-                # Check Target
-                elif current_low <= tp_price:
-                    pnl = entry_price - tp_price
-                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "PUT (PE)", "Entry": entry_price, "Exit": tp_price, "P&L Points": round(pnl, 2), "Outcome": "TARGET HIT"})
+                elif df.iloc[i]['low'] <= tp_price:
+                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "PUT (PE)", "Entry": entry_price, "Exit": tp_price, "P&L Points": round(entry_price - tp_price, 2), "Outcome": "TARGET HIT"})
                     in_position = False
-                # Check 15-Min Time limit (3 candles)
-                elif candle_count >= 3:
-                    pnl = entry_price - current_close
-                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "PUT (PE)", "Entry": entry_price, "Exit": current_close, "P&L Points": round(pnl, 2), "Outcome": "TIME OUT"})
+                elif candle_count >= 5:
+                    trade_log.append({"Entry Time": entry_time, "Exit Time": current_time, "Type": "PUT (PE)", "Entry": entry_price, "Exit": current_close, "P&L Points": round(entry_price - current_close, 2), "Outcome": "TIME OUT"})
                     in_position = False
             continue
             
-        # --- SCAN FOR NEW SIGNALS (ONLY IF SIDEWAYS/FLAT TO START NEW POSITION) ---
+        # Entry logic
         current_ema = df.iloc[i]['ema_20']
-        current_vwap = df.iloc[i]['vwap']
-        
-        # Bullish Call Setup
-        if (current_close > current_ema) and (current_close > current_vwap) and df.iloc[i]['bullish_engulfing'] and df.iloc[i]['volume_spike']:
+        if df.iloc[i]['is_bull'] and (current_close > current_ema) and df.iloc[i]['volume_spike']:
             df.iloc[i, df.columns.get_loc('signal')] = "BUY CALL (CE)"
-            in_position = True
-            pos_type = "CE"
-            entry_price = current_close
-            sl_price = df.iloc[i]['low']
-            risk = entry_price - sl_price
-            tp_price = entry_price + (risk * rrr)
-            entry_time = current_time
-            candle_count = 0
-            
-        # Bearish Put Setup
-        elif (current_close < current_ema) and (current_close < current_vwap) and df.iloc[i]['bearish_engulfing'] and df.iloc[i]['volume_spike']:
+            in_position, pos_type, entry_price, sl_price = True, "CE", current_close, df.iloc[i]['low']
+            tp_price = entry_price + ((entry_price - sl_price) * rrr)
+            entry_time, candle_count = current_time, 0
+        elif df.iloc[i]['is_bear'] and (current_close < current_ema) and df.iloc[i]['volume_spike']:
             df.iloc[i, df.columns.get_loc('signal')] = "BUY PUT (PE)"
-            in_position = True
-            pos_type = "PE"
-            entry_price = current_close
-            sl_price = df.iloc[i]['high']
-            risk = sl_price - entry_price
-            tp_price = entry_price - (risk * rrr)
-            entry_time = current_time
-            candle_count = 0
+            in_position, pos_type, entry_price, sl_price = True, "PE", current_close, df.iloc[i]['high']
+            tp_price = entry_price - ((sl_price - entry_price) * rrr)
+            entry_time, candle_count = current_time, 0
             
     return df, pd.DataFrame(trade_log)
 
-# --- SIMULATOR / DATA LOADER ---
-uploaded_file = st.file_uploader("Upload Nifty 50 5-Min CSV File", type=["csv"])
+# --- UI DATA RENDER ---
+uploaded_file = st.file_uploader("Upload Nifty 50 CSV File", type=["csv"])
 
 if uploaded_file is not None:
     data = pd.read_csv(uploaded_file)
@@ -135,54 +118,20 @@ if uploaded_file is not None:
     data.set_index(date_col, inplace=True)
     data.sort_index(inplace=True)
     
-    # Process Strategy Engines
-    with st.spinner("Simulating historical execution tracks..."):
-        results_df, trades_df = process_data(data.copy(), risk_reward_ratio, vol_multiplier, ema_length)
-    
-    # --- PERFORMANCE KPI METRICS ---
-    col1, col2, col3, col4 = st.columns(4)
+    results_df, trades_df = process_data(data.copy(), risk_reward_ratio, ema_length, vol_multiplier, trade_setup)
     
     if not trades_df.empty:
-        total_trades = len(trades_df)
-        profitable_trades = len(trades_df[trades_df['P&L Points'] > 0])
-        win_rate = (profitable_trades / total_trades) * 100
-        net_points = trades_df['P&L Points'].sum()
+        col1, col2, col3 = st.columns(3)
+        win_rate = (len(trades_df[trades_df['P&L Points'] > 0]) / len(trades_df)) * 100
+        col1.metric("Total Executed Trades", len(trades_df))
+        col2.metric("Win Rate (%)", f"{win_rate:.1f}%")
+        col3.metric("Net Points", f"{trades_df['P&L Points'].sum():+.2f}")
         
-        with col1:
-            st.metric("Total Executed Trades", total_trades)
-        with col2:
-            st.metric("Win Rate (%)", f"{win_rate:.1f}%")
-        with col3:
-            st.metric("Net Strategy Points", f"{net_points:+.2f}")
-        with col4:
-            st.metric("Profitable vs Losing", f"{profitable_trades}W - {total_trades - profitable_trades}L")
-            
-        # --- LOG DISPLAY PANEL ---
-        st.subheader("📋 Complete Profit & Loss Closed Trade Log")
-        
-        # Color coding rows for readability
+        st.subheader("📋 Closed Trade Log")
         def style_pnl(val):
-            color = 'green' if val > 0 else 'red'
-            return f'color: {color}; font-weight: bold;'
-            
-        st.dataframe(trades_df.style.applymap(style_pnl, subset=['P&L Points']))
+            return f"color: {'green' if val > 0 else 'red'}; font-weight: bold;"
         
-        # --- GRAPH VISUALIZATION ---
-        st.subheader("📈 Chart Visualization")
-        fig = go.Figure(data=[go.Candlestick(x=results_df.index, open=results_df['open'], high=results_df['high'], low=results_df['low'], close=results_df['close'], name='Nifty 50')])
-        fig.add_trace(go.Scatter(x=results_df.index, y=results_df['vwap'], line=dict(color='orange', width=1.2), name='VWAP'))
-        fig.add_trace(go.Scatter(x=results_df.index, y=results_df['ema_20'], line=dict(color='blue', width=1.2), name='EMA'))
-        
-        # Dynamic Signals Overlay mapping
-        ce_entries = results_df[results_df['signal'] == "BUY CALL (CE)"]
-        pe_entries = results_df[results_df['signal'] == "BUY PUT (PE)"]
-        fig.add_trace(go.Scatter(x=ce_entries.index, y=ce_entries['close'], mode='markers', marker=dict(symbol='triangle-up', size=13, color='green'), name='CE Buy'))
-        fig.add_trace(go.Scatter(x=pe_entries.index, y=pe_entries['close'], mode='markers', marker=dict(symbol='triangle-down', size=13, color='red'), name='PE Buy'))
-        
-        fig.update_layout(xaxis_rangeslider_visible=False, height=550)
-        st.plotly_chart(fig, use_container_width=True)
-        
+        # FIXED: Using modern .map() instead of .applymap() to avoid the AttributeError
+        st.dataframe(trades_df.style.map(style_pnl, subset=['P&L Points']))
     else:
-        st.warning("⚠️ No trades matched your strategy constraints with the current settings. Try lowering the Volume Spike Multiplier.")
-else:
-    st.info("💡 Awaiting CSV historical template data to generate metrics panel metrics.")
+        st.warning("No trades found. Lower your Volume Filter in the sidebar.")
